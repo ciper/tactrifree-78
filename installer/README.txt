@@ -1,4 +1,4 @@
-tactrifree 78 1.0 beta6 - for Windows 7, 8 and 8.1
+tactrifree 78 1.0 beta7 - for Windows 7, 8 and 8.1
 ==================================================
 Open-source J2534 driver for the OpenPort 2.0 cable, for J2534 programs
 (RomRaider, FastECU, ...). Windows 7, 8 and 8.1, 32-bit or 64-bit.

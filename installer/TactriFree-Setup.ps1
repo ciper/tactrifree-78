@@ -27,7 +27,7 @@
 
 param([switch]$Uninstall, [switch]$Plan, [switch]$RebindDriver, [string]$SandboxRoot = '', [switch]$NoPause)
 $ErrorActionPreference = 'Stop'
-$Version = '1.0 beta6 for Windows 7/8/8.1'
+$Version = '1.0 beta7 for Windows 7/8/8.1'
 $Here    = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $HwIds   = @('USB\VID_0403&PID_CC4D', 'USB\VID_0403&PID_CC4C&MI_00')
 $Sandbox = [bool]$SandboxRoot
@@ -126,6 +126,11 @@ function Our-Packages(){                      # TactriFree WinUSB packages in Wi
         if($t.Contains('TactriFree project') -and $t.Contains('tactrifree_winusb.cat')){
             $r += New-Object PSObject -Property @{ pub = $f.Name; ver = (Inf-Version $t) } } }
     return $r }
+function Catalog-Signer($pub){                # thumbprint of the certificate that signed an installed package oemN.inf ('' if not readable)
+    $c = Join-Path $env:SystemRoot ('System32\CatRoot\{F750E6C3-38EE-11D1-85E5-00C04FC295EE}\' + [IO.Path]::GetFileNameWithoutExtension($pub) + '.cat')
+    if(-not (Test-Path -LiteralPath $c)){ return '' }
+    $s = Get-AuthenticodeSignature -FilePath $c
+    if($s.SignerCertificate){ return [string]$s.SignerCertificate.Thumbprint }; return '' }
 function Read-State(){ if(Test-Path $State){ return (Import-Clixml $State) }; return $null }
 function Save-State($s){ if($Plan){ return }               # install record; written after step 3 too (partial installs)
     New-Item -ItemType Directory -Force $Dir64 | Out-Null; $s | Export-Clixml -Path $State }
@@ -226,11 +231,16 @@ if($Uninstall){
             if([TfSetup7]::SetupUninstallOEMInfW($pp, 1, [IntPtr]::Zero)){ Say '   removed' }
             else { $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); Say ("   NOT removed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) } } } }
     else { Say '   no TactriFree driver package installed - left as it is' }
-    # the recorded certificate AND any other TactriFree signing certificate (e.g. left by an interrupted install)
+    # the recorded certificate AND any other TactriFree signing certificate (e.g. left by an interrupted install).
+    # Sandbox: only its own recorded certificate, and never one that is also in the machine stores - the CurrentUser Root
+    # and TrustedPublisher stores also SHOW the LocalMachine certificates, and run as Administrator a removal there deletes
+    # the machine copy (a sandbox test removed a real installation's certificates this way)
+    $rec = ''; if($st -and $st.certThumbprint){ $rec = [string]$st.certThumbprint }
+    $machine = @(); if($Sandbox){ foreach($ms in 'Root','TrustedPublisher'){ $machine += @(Store-Find $ms 'LocalMachine' { $true } | ForEach-Object { $_.Thumbprint }) } }
     foreach($store in 'Root','TrustedPublisher'){
         $loc = 'LocalMachine'; if($Sandbox){ $loc = 'CurrentUser' }
-        $rec = ''; if($st -and $st.certThumbprint){ $rec = [string]$st.certThumbprint }
-        foreach($c in @(Store-Find $store $loc { ($rec -and $_.Thumbprint -eq $rec) -or $_.Subject -like 'CN=TactriFree local driver signing*' })){
+        foreach($c in @(Store-Find $store $loc { if($Sandbox){ $rec -and $_.Thumbprint -eq $rec -and ($machine -notcontains $_.Thumbprint) }
+                                                 else { ($rec -and $_.Thumbprint -eq $rec) -or $_.Subject -like 'CN=TactriFree local driver signing*' } })){
             $t = $c.Thumbprint
             Do-It "remove the local TactriFree signing certificate $($t.Substring(0,8)) from $store" { [void](Store-Remove $store $loc $t) } } }
     Step 'J2534 registry entries'
@@ -330,7 +340,23 @@ else {
             if(-not [TfSetup7]::SetupCopyOEMInfW((Join-Path $work 'tactrifree_winusb.inf'), $work, 1, 0, $sb, 520, [ref]$req, [IntPtr]::Zero)){
                 $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw ("adding the driver package failed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) }
             $st.driverInf = Split-Path $sb.ToString() -Leaf
-            Say "   added as $($st.driverInf)" }
+            Say "   added as $($st.driverInf)"
+            # for a package identical to one it already has, Windows keeps ITS copy, signed at an earlier install: the
+            # certificate just made then signs nothing, and the earlier one may no longer be trusted. That copy is removed
+            # and the package added again, so the cable gets the package signed just now.
+            $signer = Catalog-Signer $st.driverInf
+            if($signer -and $signer -ne $st.certThumbprint){
+                Say "   Windows kept its earlier copy $($st.driverInf) (signed at an earlier install by certificate $($signer.Substring(0,8))) - replace it with the package signed just now"
+                if(-not [TfSetup7]::SetupUninstallOEMInfW($st.driverInf, 1, [IntPtr]::Zero)){ $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                    Say ("   removing it failed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) }
+                $sb = New-Object System.Text.StringBuilder 520; $req = 0
+                if(-not [TfSetup7]::SetupCopyOEMInfW((Join-Path $work 'tactrifree_winusb.inf'), $work, 1, 0, $sb, 520, [ref]$req, [IntPtr]::Zero)){
+                    $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); throw ("adding the driver package failed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) }
+                $st.driverInf = Split-Path $sb.ToString() -Leaf
+                Say "   added as $($st.driverInf)"
+                $signer = Catalog-Signer $st.driverInf
+                if($signer -and $signer -ne $st.certThumbprint){
+                    throw "Windows still uses its earlier copy of the driver package ($($st.driverInf), signed by certificate $signer); uninstall TactriFree, then run setup again" } } }
         Do-It 'bind the cable to it (forced, like Zadig''s Replace Driver)' {
             Load-Native
             $reboot = $false; $ok = $false; $err = [uint32]0; [int]$raw = 0
@@ -358,18 +384,26 @@ else {
                 else { throw ("binding the cable failed, error 0x{0:X8} {1}; the cable is on driver service '{2}', INF '{3}'" -f $err, (Win32-Text $raw), $now.service, $now.inf) } } }
         # every other TactriFree package goes, same version included (a reinstall used to leave the previous one behind,
         # unrecorded); never the one the cable is on now
-        $stale = @($ours | Where-Object { $_.pub -ine $st.driverInf -and $_.pub -ine $script:inUseInf })
+        # (listed again: the package list may have changed above)
+        $list = $ours; if(-not $Plan){ $list = @(Our-Packages) }
+        $stale = @($list | Where-Object { $_.pub -ine $st.driverInf -and $_.pub -ine $script:inUseInf })
         foreach($o in $stale){
             $op = $o.pub
             Do-It "remove the previous TactriFree driver package $op v$($o.ver)" {
                 Load-Native; if(-not [TfSetup7]::SetupUninstallOEMInfW($op, 1, [IntPtr]::Zero)){ $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                     Say ("   NOT removed, error 0x{0:X8} {1} (harmless: an unused old package)" -f (U32 $e), (Win32-Text $e)) } } }
-        # their certificates too - unless the cable stayed on an existing package, whose certificate must stay trusted
-        if(-not $Plan -and (-not $script:inUseInf -or $script:inUseInf -ieq $st.driverInf)){
-            foreach($store in 'Root','TrustedPublisher'){
-                foreach($old in @(Store-Find $store 'LocalMachine' { $_.Subject -like 'CN=TactriFree local driver signing*' -and $_.Thumbprint -ne $st.certThumbprint })){
-                    $t = $old.Thumbprint
-                    Do-It "remove the old TactriFree signing certificate $t from $store" { [void](Store-Remove $store 'LocalMachine' $t) } } } }
+        # signing certificates: keep every one that signs a TactriFree package still in Windows (the new one, or an
+        # earlier one the cable stays on), remove the other TactriFree ones. Nothing is removed if a signer can't be read.
+        if($Plan){ Say '   [plan] remove TactriFree signing certificates that sign none of the TactriFree driver packages left in Windows' }
+        else {
+            $keep = @(); $known = $true
+            foreach($p in @(Our-Packages)){ $t = Catalog-Signer $p.pub; if($t){ $keep += $t } else { $known = $false } }
+            if(-not $known){ Say '   the signer of a TactriFree driver package could not be read - earlier signing certificates kept' }
+            else {
+                foreach($store in 'Root','TrustedPublisher'){
+                    foreach($old in @(Store-Find $store 'LocalMachine' { $_.Subject -like 'CN=TactriFree local driver signing*' -and ($keep -notcontains $_.Thumbprint) })){
+                        $t = $old.Thumbprint
+                        Do-It "remove the unused TactriFree signing certificate $($t.Substring(0,8)) from $store" { [void](Store-Remove $store 'LocalMachine' $t) } } } } }
     }
     } finally {
         if(-not $Plan){ Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue; Save-State $st } }
