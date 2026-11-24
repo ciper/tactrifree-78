@@ -1,4 +1,11 @@
-; tactrifree 1.0 beta5 - binds the OpenPort 2.0 cable (USB\VID_0403&PID_CC4D) to the inbox WinUSB driver.
+; tactrifree_winusb.inf - Windows 7 / 8 / 8.1 version. Binds the OpenPort 2.0 cable (J2534 mode: USB\VID_0403&PID_CC4D, or its
+; composite form USB\VID_0403&PID_CC4C&MI_00) to Microsoft's WinUSB driver (winusb.sys, part of Windows 7 / 8 / 8.1 and
+; signed by Microsoft). This package contains no driver code of its own.
+; Differences from the Windows 10/11 INF: defines the USBDevice setup class (built into Windows only from 8 on; on 8 / 8.1
+; the class already exists and [ClassInstall32] is not used), registers the WinUSB service and its KMDF binding
+; explicitly, and lists ONLY TactriFree's own interface ID (there is no EcuFlash bridge in this package, so EcuFlash must
+; not find the cable on WinUSB).
+; The bootloader PID (CC4B) is deliberately not matched.
 ; SPDX-License-Identifier: GPL-3.0-or-later
 
 [Version]
@@ -7,11 +14,17 @@ Class       = USBDevice
 ClassGuid   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
 Provider    = %ProviderName%
 CatalogFile = tactrifree_winusb.cat
-DriverVer   = 11/08/2026,1.0.2.0
-PnpLockdown = 1
+DriverVer   = 11/23/2026,1.0.7.1
+
+[ClassInstall32]
+AddReg = TactriFree_ClassReg
+
+[TactriFree_ClassReg]
+HKR,,,0,%ClassName%
+HKR,,Icon,,-20
 
 [Manufacturer]
-%ProviderName% = TactriFree,NTx86,NTamd64,NTarm64
+%ProviderName% = TactriFree,NTx86,NTamd64
 
 [TactriFree.NTx86]
 %DeviceName% = TactriFree_Install, USB\VID_0403&PID_CC4D
@@ -21,24 +34,36 @@ PnpLockdown = 1
 %DeviceName% = TactriFree_Install, USB\VID_0403&PID_CC4D
 %DeviceName% = TactriFree_Install, USB\VID_0403&PID_CC4C&MI_00
 
-[TactriFree.NTarm64]
-%DeviceName% = TactriFree_Install, USB\VID_0403&PID_CC4D
-%DeviceName% = TactriFree_Install, USB\VID_0403&PID_CC4C&MI_00
-
 [TactriFree_Install]
 Include = winusb.inf
 Needs   = WINUSB.NT
 
 [TactriFree_Install.Services]
-Include = winusb.inf
-Needs   = WINUSB.NT.Services
+Include    = winusb.inf
+AddService = WinUSB,0x00000002,TactriFree_WinUSB_Service
+
+[TactriFree_WinUSB_Service]
+DisplayName   = %WinUSB_SvcDesc%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\WinUSB.sys
+
+[TactriFree_Install.Wdf]
+KmdfService = WINUSB, TactriFree_WinUSB_Wdf
+
+[TactriFree_WinUSB_Wdf]
+KmdfLibraryVersion = 1.9
 
 [TactriFree_Install.HW]
 AddReg = TactriFree_AddReg
 
 [TactriFree_AddReg]
-HKR,,DeviceInterfaceGUIDs,0x10000,"{700E05E7-C0F6-4B43-9701-8485D5CFA2CC}","{6D1781B7-C987-4F6C-8D4F-1EFC098BEA67}"
+; TactriFree's own device interface ID; the TactriFree J2534 DLLs find the cable by it.
+HKR,,DeviceInterfaceGUIDs,0x10000,"{700E05E7-C0F6-4B43-9701-8485D5CFA2CC}"
 
 [Strings]
-ProviderName = "TactriFree project"
-DeviceName   = "OpenPort 2.0 J2534 interface (WinUSB, TactriFree)"
+ProviderName   = "TactriFree project"
+ClassName      = "Universal Serial Bus devices"
+DeviceName     = "OpenPort 2.0 J2534 interface (WinUSB, TactriFree)"
+WinUSB_SvcDesc = "WinUSB driver"
