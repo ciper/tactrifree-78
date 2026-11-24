@@ -1,13 +1,13 @@
-tactrifree for Windows 7, 8 and 8.1 - TEST BUILD 2
+tactrifree 78 1.0 beta6 - for Windows 7, 8 and 8.1
 ==================================================
 Open-source J2534 driver for the OpenPort 2.0 cable, for J2534 programs
 (RomRaider, FastECU, ...). Windows 7, 8 and 8.1, 32-bit or 64-bit.
 On Windows 10 and 11 use the normal tactrifree package instead.
 Not affiliated with or endorsed by Tactrix.
 
-THIS IS A TEST BUILD. If anything goes wrong, the setup window stays open
-and shows what failed: please send a photo/screenshot of the whole window,
-or the log file it names, to the TactriFree developer.
+If anything goes wrong, the setup window stays open and shows what failed:
+please report it on the project's GitHub page with a screenshot of the whole
+window, or the log file it names.
 
 NOT INCLUDED: EcuFlash support. EcuFlash keeps using the original Tactrix
 driver, so while tactrifree is installed EcuFlash does not see the cable.

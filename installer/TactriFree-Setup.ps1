@@ -27,7 +27,7 @@
 
 param([switch]$Uninstall, [switch]$Plan, [switch]$RebindDriver, [string]$SandboxRoot = '', [switch]$NoPause)
 $ErrorActionPreference = 'Stop'
-$Version = '1.0 beta5 for Windows 7/8/8.1 (test 2)'
+$Version = '1.0 beta6 for Windows 7/8/8.1'
 $Here    = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $HwIds   = @('USB\VID_0403&PID_CC4D', 'USB\VID_0403&PID_CC4C&MI_00')
 $Sandbox = [bool]$SandboxRoot
@@ -127,6 +127,8 @@ function Our-Packages(){                      # TactriFree WinUSB packages in Wi
             $r += New-Object PSObject -Property @{ pub = $f.Name; ver = (Inf-Version $t) } } }
     return $r }
 function Read-State(){ if(Test-Path $State){ return (Import-Clixml $State) }; return $null }
+function Save-State($s){ if($Plan){ return }               # install record; written after step 3 too (partial installs)
+    New-Item -ItemType Directory -Force $Dir64 | Out-Null; $s | Export-Clixml -Path $State }
 
 # P/Invoke: SetupAPI staging / removal and the forced driver update (the same calls Zadig/libwdi use). C# 2.0 syntax.
 $native = @'
@@ -139,6 +141,11 @@ public static class TfSetup7 {
                                              StringBuilder dest, int destSize, out int required, IntPtr component);
   [DllImport("setupapi.dll", CharSet=CharSet.Unicode, SetLastError=true)]
   public static extern bool SetupUninstallOEMInfW(string inf, uint flags, IntPtr reserved);
+  // the error is read right here: read later from PowerShell it can already be overwritten (ciper/tactrifree#1)
+  public static bool Bind(string hwid, string inf, uint flags, out bool reboot, out int err){
+    bool ok = UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hwid, inf, flags, out reboot);
+    if(ok) err = 0; else err = Marshal.GetLastWin32Error();
+    return ok; }
 }
 '@
 function Load-Native(){ if(-not ('TfSetup7' -as [type])){ Add-Type -TypeDefinition $native } }
@@ -210,17 +217,22 @@ if($Uninstall){
     $st = Read-State
     if(-not $st){ Say "No install record ($State): removing only what is recognisably TactriFree's." }
     Step 'USB driver'
-    if($st -and $st.driverInf){
-        Do-It "remove driver package $($st.driverInf) (the cable returns to the next best driver after a replug)" {
+    # the recorded package and any other TactriFree package (left by a reinstall or an interrupted install)
+    $pk = @(); if(-not $Sandbox){ $pk = @(Our-Packages | ForEach-Object { $_.pub }) }
+    if($st -and $st.driverInf -and ($pk -notcontains [string]$st.driverInf)){ $pk += [string]$st.driverInf }
+    if($pk.Count){ foreach($p in $pk){ $pp = $p
+        Do-It "remove driver package $pp (the cable returns to the next best driver after a replug)" {
             Load-Native
-            if([TfSetup7]::SetupUninstallOEMInfW($st.driverInf, 1, [IntPtr]::Zero)){ Say '   removed' }
-            else { $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); Say ("   NOT removed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) } }
-    } else { Say '   TactriFree did not install the USB driver - left as it is' }
-    if($st -and $st.certThumbprint){
-        foreach($store in 'Root','TrustedPublisher'){
-            $loc = 'LocalMachine'; if($Sandbox){ $loc = 'CurrentUser' }
-            if(@(Store-Find $store $loc { $_.Thumbprint -eq $st.certThumbprint }).Count){
-                Do-It "remove the local TactriFree signing certificate from $store" { [void](Store-Remove $store $loc $st.certThumbprint) } } } }
+            if([TfSetup7]::SetupUninstallOEMInfW($pp, 1, [IntPtr]::Zero)){ Say '   removed' }
+            else { $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error(); Say ("   NOT removed, error 0x{0:X8} {1}" -f (U32 $e), (Win32-Text $e)) } } } }
+    else { Say '   no TactriFree driver package installed - left as it is' }
+    # the recorded certificate AND any other TactriFree signing certificate (e.g. left by an interrupted install)
+    foreach($store in 'Root','TrustedPublisher'){
+        $loc = 'LocalMachine'; if($Sandbox){ $loc = 'CurrentUser' }
+        $rec = ''; if($st -and $st.certThumbprint){ $rec = [string]$st.certThumbprint }
+        foreach($c in @(Store-Find $store $loc { ($rec -and $_.Thumbprint -eq $rec) -or $_.Subject -like 'CN=TactriFree local driver signing*' })){
+            $t = $c.Thumbprint
+            Do-It "remove the local TactriFree signing certificate $($t.Substring(0,8)) from $store" { [void](Store-Remove $store $loc $t) } } }
     Step 'J2534 registry entries'
     foreach($rk in ($Reg32Root + '\' + $J2534Key), ($Reg64Root + '\' + $J2534Key)){
         if(Reg-Exists $rk){ Do-It "delete $rk" { Reg-Delete $rk } } }
@@ -234,7 +246,8 @@ if($Uninstall){
         else {
             # this script may be running from <ProgramFiles>\TactriFree\setup: remove the folders a few seconds after it exits
             $cmd = "/c ping -n 5 127.0.0.1 >nul & rmdir /s /q `"$Dir64`" & rmdir /s /q `"$Dir86`""
-            Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmd -WindowStyle Hidden }
+            # started in the Windows folder: a working folder inside TactriFree's would block its own removal
+            Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList $cmd -WindowStyle Hidden -WorkingDirectory $env:SystemRoot }
     }
     Say ''; if($Plan){ Say 'Plan complete - nothing was changed.'; return }
     Say 'TactriFree removed. Unplug and replug the cable.'
@@ -264,7 +277,8 @@ foreach($root in @($Reg32Root, $Reg64Root) | Select-Object -Unique){
     $names = $pk.GetSubKeyNames()
     foreach($n in $names){
         if($n -eq 'TactriFree'){ continue }
-        $k = $pk.OpenSubKey($n); $nm = [string]$k.GetValue('Name'); $fl = [string]$k.GetValue('FunctionLibrary'); $k.Close()
+        $k = $pk.OpenSubKey($n); if(-not $k){ continue }       # key gone between listing and opening
+        $nm = [string]$k.GetValue('Name'); $fl = [string]$k.GetValue('FunctionLibrary'); $k.Close()
         if(($n + ' ' + $nm) -match 'OpenPort|Tactrix' -and $fl -and -not (Test-Path -LiteralPath $fl)){
             $full = $root + '\PassThruSupport.04.04\' + $n
             Do-It "remove broken J2534 entry '$n' (its DLL $fl does not exist)" { Reg-Delete $full } } }
@@ -284,8 +298,11 @@ $curOurs = @($ours | Where-Object { $_.pub -ieq $cs.inf }) | Select-Object -Firs
 if($curOurs -and $curOurs.ver -ge $newVer -and -not $RebindDriver){
     Say "   the cable already uses TactriFree's driver package v$($curOurs.ver) - up to date"; $st.driverNote = 'TactriFree package current' }
 else {
-    $older = @($ours | Where-Object { $_.ver -lt $newVer })
+    $script:inUseInf = ''
     $work = Join-Path ([IO.Path]::GetTempPath()) ('tactrifree-driver-' + [Guid]::NewGuid().ToString('N').Substring(0,8))
+    # try/finally: if anything below fails, the temporary folder still goes and what WAS done (certificate, driver
+    # package) is recorded, so -Uninstall can remove it
+    try {
     Do-It "prepare the driver package in $work" { New-Item -ItemType Directory -Force $work | Out-Null
         Copy-Item (Join-Path $Here 'driver\tactrifree_winusb.inf'), (Join-Path $Here 'driver\tactrifree_winusb.cat') $work }
     Do-It 'create a signing certificate for this PC only and sign the catalog with it' {
@@ -316,27 +333,46 @@ else {
             Say "   added as $($st.driverInf)" }
         Do-It 'bind the cable to it (forced, like Zadig''s Replace Driver)' {
             Load-Native
-            $reboot = $false; $ok = $false; $err = [uint32]0
+            $reboot = $false; $ok = $false; $err = [uint32]0; [int]$raw = 0
             foreach($id in $HwIds){                                      # whichever form of the cable is plugged in
-                $ok = [TfSetup7]::UpdateDriverForPlugAndPlayDevicesW([IntPtr]::Zero, $id, (Join-Path $work 'tactrifree_winusb.inf'), 1, [ref]$reboot)
-                $err = U32 ([Runtime.InteropServices.Marshal]::GetLastWin32Error())
+                $ok = [TfSetup7]::Bind($id, (Join-Path $work 'tactrifree_winusb.inf'), 1, [ref]$reboot, [ref]$raw)
+                $err = U32 $raw
                 if($ok -or $err -ne [uint32]3758096907){ break } }        # 3758096907 = 0xE000020B ERROR_NO_SUCH_DEVINST
+            $script:inUseInf = $st.driverInf                             # the package the cable is (or will be) on
             if($ok){ Say "   cable bound to WinUSB$(if($reboot){' (Windows asks for a restart)'})"; $st.driverNote = 'TactriFree package bound' }
             elseif($err -eq [uint32]3758096907){ Say '   cable not plugged in: the package is installed and Windows will use it when the cable is plugged in'
                                                  $st.driverNote = 'staged (cable absent)' }
-            else { throw ("binding the cable failed, error 0x{0:X8} {1}" -f $err, (Win32-Text ([BitConverter]::ToInt32([BitConverter]::GetBytes($err),0)))) } }
-        foreach($o in $older){
-            if($o.pub -ieq $st.driverInf){ continue }
-            Do-It "remove the older TactriFree driver package $($o.pub) v$($o.ver)" {
-                Load-Native; if(-not [TfSetup7]::SetupUninstallOEMInfW($o.pub, 1, [IntPtr]::Zero)){ $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            else {
+                # Windows reported a failure (seen as error 0 when setup runs again over an installed TactriFree, ciper/
+                # tactrifree#1). What counts is where the cable is now: on WinUSB with THIS version of TactriFree's package
+                # it is ready; anything else stops setup with the details.
+                $now = Cable-Status
+                $nowOurs = $now.inf -and @(Our-Packages | Where-Object { $_.pub -ieq $now.inf -and $_.ver -ge $newVer }).Count -gt 0
+                if($now.present -and $now.service -ieq 'WinUSB' -and $nowOurs){
+                    $script:inUseInf = $now.inf; $st.driverInf = $now.inf       # record the package actually in use
+                    Say ("   Windows reported error 0x{0:X8} for the bind, but the cable is on WinUSB with TactriFree's driver package {1} - OK" -f $err, $now.inf)
+                    $st.driverNote = ('TactriFree package in use (bind reported error 0x{0:X8})' -f $err) }
+                elseif(-not $now.present){
+                    Say ("   bind reported error 0x{0:X8} and the cable is not plugged in: the package is installed and Windows will use it when the cable is plugged in" -f $err)
+                    $st.driverNote = 'staged (cable absent)' }
+                else { throw ("binding the cable failed, error 0x{0:X8} {1}; the cable is on driver service '{2}', INF '{3}'" -f $err, (Win32-Text $raw), $now.service, $now.inf) } } }
+        # every other TactriFree package goes, same version included (a reinstall used to leave the previous one behind,
+        # unrecorded); never the one the cable is on now
+        $stale = @($ours | Where-Object { $_.pub -ine $st.driverInf -and $_.pub -ine $script:inUseInf })
+        foreach($o in $stale){
+            $op = $o.pub
+            Do-It "remove the previous TactriFree driver package $op v$($o.ver)" {
+                Load-Native; if(-not [TfSetup7]::SetupUninstallOEMInfW($op, 1, [IntPtr]::Zero)){ $e = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
                     Say ("   NOT removed, error 0x{0:X8} {1} (harmless: an unused old package)" -f (U32 $e), (Win32-Text $e)) } } }
-        if(-not $Plan){
+        # their certificates too - unless the cable stayed on an existing package, whose certificate must stay trusted
+        if(-not $Plan -and (-not $script:inUseInf -or $script:inUseInf -ieq $st.driverInf)){
             foreach($store in 'Root','TrustedPublisher'){
                 foreach($old in @(Store-Find $store 'LocalMachine' { $_.Subject -like 'CN=TactriFree local driver signing*' -and $_.Thumbprint -ne $st.certThumbprint })){
                     $t = $old.Thumbprint
                     Do-It "remove the old TactriFree signing certificate $t from $store" { [void](Store-Remove $store 'LocalMachine' $t) } } } }
     }
-    if(-not $Plan){ Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue }
+    } finally {
+        if(-not $Plan){ Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue; Save-State $st } }
 }
 
 Step '4. Programs and Features entry'
@@ -347,7 +383,7 @@ Do-It "register 'TactriFree' for uninstall" {
         InstallLocation=$Dir64; NoModify=1; NoRepair=1;
         UninstallString="`"$psExe`" -NoProfile -ExecutionPolicy Bypass -File `"$setupCopy`" -Uninstall" } }
 
-if(-not $Plan){ New-Item -ItemType Directory -Force $Dir64 | Out-Null; $st | Export-Clixml -Path $State }
+Save-State $st
 Say ''
 if($Plan){ Say 'Plan complete - nothing was changed. Run without -Plan (as Administrator) to install.'; return }
 Say 'TactriFree installed.'

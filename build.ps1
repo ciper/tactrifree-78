@@ -28,7 +28,7 @@ Cl 'vcvars64.bat' "$root\out\x64" "$rc /dTF_KIND=2 `"$root\version.rc`" && cl $c
 Get-ChildItem "$root\out" -Recurse -Filter *.dll | ForEach-Object { 'built ' + $_.FullName }
 if(-not $Package){ return }
 
-$ver = 'test2'
+$ver = '1.0-beta6'
 $rel = Join-Path $root "release\TactriFree-78-$ver"
 if(Test-Path $rel){ Remove-Item $rel -Recurse -Force }
 foreach($d in 'x86','x64','driver'){ New-Item -ItemType Directory -Force "$rel\$d" | Out-Null }
