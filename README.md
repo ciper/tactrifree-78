@@ -1,4 +1,5 @@
 # tactrifree 78
 
-Openport replacement drivers for Windows 7 and 8 with no ecuflash bridge.
-Windows 10 and 11 should use this instead - https://github.com/ciper/tactrifree
+Tactrifree78 is a replacement driver for the Openport 2.0 that provides 32/64 bit J2534 interfacesWindows 7 and 8 (no ecuflash support)
+
+Windows 10 and 11 should use the main version at https://github.com/ciper/tactrifree
